@@ -1,15 +1,18 @@
 # codex-review-mcp
 
-MCP message broker server that automates code review loops between Claude Code and OpenAI Codex CLI.
+MCP server that automates code review loops between Claude Code and OpenAI Codex CLI.
 
 ## Overview
 
-Two AI coding agents run simultaneously and exchange code reviews via MCP.
+Two AI coding agents run simultaneously and exchange code reviews via MCP, communicating through files in the working directory.
 
 ```
-Claude Code ←── SSE ──→ Broker Server ←── Streamable HTTP ──→ Codex CLI
- (implementer)          (localhost:3456)                      (reviewer)
+Claude Code ←── stdio ──→ MCP Server (role=claude) ──→ .codex-review/requests/
+Codex CLI   ←── stdio ──→ MCP Server (role=codex)  ←── .codex-review/requests/
+                                                    ──→ .codex-review/responses/
 ```
+
+No separate broker server needed. Each agent runs its own stdio MCP server process, and they communicate via JSON files in `.codex-review/`.
 
 ### Review Loop
 
@@ -26,31 +29,21 @@ npm install
 npm run build
 ```
 
-## Usage
+## Setup
 
-### 1. Start the server
-
-```bash
-node build/index.js              # default port 3456
-node build/index.js --port 8080  # custom port
-```
-
-### 2. Register with Claude Code (one-time)
+### Register with Claude Code (one-time)
 
 ```bash
-claude mcp add --transport sse codex-review http://localhost:3456/sse/claude
+claude mcp add codex-review -- node /path/to/codex-review-mcp/build/index.js --role claude
 ```
 
-### 3. Register with Codex CLI (one-time)
+### Register with Codex CLI (one-time)
 
-Add to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.codex-review]
-url = "http://localhost:3456/mcp/codex"
+```bash
+codex mcp add codex-review -- node /path/to/codex-review-mcp/build/index.js --role codex
 ```
 
-### 4. Run
+### Run
 
 - **To Claude:** "Implement feature X" → Claude implements, then automatically calls `request_review`
 - **To Codex:** "Enter review mode" → Codex enters `wait_for_review_request` → `submit_review` loop
@@ -62,7 +55,7 @@ url = "http://localhost:3456/mcp/codex"
 | Tool | Description |
 |------|-------------|
 | `request_review` | Request a review from Codex and wait for the response. Returns `{ approved, feedback, iteration }` |
-| `get_review_status` | Check channel status |
+| `get_review_status` | Check review status |
 
 ### Codex only (role=codex)
 
@@ -70,7 +63,7 @@ url = "http://localhost:3456/mcp/codex"
 |------|-------------|
 | `wait_for_review_request` | Wait for a review request from Claude. Returns `{ context, iteration }` |
 | `submit_review` | Submit review feedback. Requires `feedback`, `approved`, and `iteration` |
-| `get_review_status` | Check channel status |
+| `get_review_status` | Check review status |
 
 ## MCP Prompts
 
@@ -79,32 +72,13 @@ url = "http://localhost:3456/mcp/codex"
 | `implement_and_review` | Claude | Guides the implement → review → fix loop workflow |
 | `review_mode` | Codex | Guides continuous review mode |
 
-## Channels
+## Known Limitations
 
-Run multiple Claude↔Codex pairs simultaneously using channels.
-
-```
-# Single pair (default)
-request_review(context="...")               # channel="default" implied
-
-# Multiple pairs
-request_review(context="...", channel="feature-a")
-wait_for_review_request(channel="feature-a")
-```
+**Codex CLI tool call timeout (120s):** Codex CLI has a hard 120-second timeout on MCP tool calls. If `wait_for_review_request` doesn't receive a request within 120s, the call will fail with a timeout error. When this happens, Codex should simply call `wait_for_review_request` again to resume waiting. The request file persists on disk, so no messages are lost.
 
 ## Architecture
 
-- **In-memory message broker**: Event-driven, real-time message delivery
-- **Dual transport**: SSE (Claude Code) + Streamable HTTP (Codex CLI)
-- **Iteration matching**: Pairs requests and responses by iteration number, prevents stale response consumption
-- **Waiter cancellation**: Cleans up orphaned waiters via AbortSignal when transport disconnects
-
-## Endpoints
-
-| Path | Protocol | Purpose |
-|------|----------|---------|
-| `/sse/claude` | SSE | Claude Code connection |
-| `/sse/codex` | SSE | Codex SSE connection (alternative) |
-| `/mcp/claude` | Streamable HTTP | Claude Streamable HTTP connection (alternative) |
-| `/mcp/codex` | Streamable HTTP | Codex CLI connection |
-| `/health` | HTTP GET | Server health check |
+- **File-based IPC**: Messages are JSON files in `.codex-review/` — no broker server needed
+- **stdio transport**: Both agents use the standard MCP stdio transport
+- **Iteration matching**: Pairs requests and responses by iteration number
+- **No message loss**: Files persist on disk until explicitly consumed. If a poll is interrupted, the file stays for the next attempt

@@ -1,14 +1,15 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { GetBroker } from "../create-server.js";
+import { writeRequest, pollForResponse, markResponseConsumed } from "../file-store.js";
 
-export function registerRequestReview(server: McpServer, getBroker: GetBroker): void {
+export function registerRequestReview(server: McpServer): void {
   server.registerTool("request_review", {
     description:
       "Request a code review from the Codex reviewer. " +
       "The reviewer has access to the same repo, so no need to pass code. " +
       "Just describe what you changed. Returns { approved, feedback, iteration }. " +
-      "If not approved, fix the issues and call this again. Repeat until approved.",
+      "After receiving the result, always call ack_review(iteration) to confirm receipt. " +
+      "If not approved, fix the issues, call ack_review, then call request_review again.",
     inputSchema: {
       context: z
         .string()
@@ -20,28 +21,55 @@ export function registerRequestReview(server: McpServer, getBroker: GetBroker): 
         .describe("Channel name for routing. Use different channels for parallel review sessions"),
     },
   }, async ({ context, channel }, extra) => {
-    const broker = getBroker(channel ?? "default");
+    const ch = channel ?? "default";
+    const iteration = writeRequest(context, ch);
 
-    const iteration = broker.sendToCodex({
-      context,
-      requestedAt: Date.now(),
-    });
+    let nack: (() => void) | undefined;
+    const onAbort = () => { nack?.(); };
+    extra.signal?.addEventListener("abort", onAbort, { once: true });
 
-    const { promise, cancel } = broker.waitForReviewResponse(iteration);
+    try {
+      const claimed = await pollForResponse(iteration, ch, extra.signal);
+      nack = claimed.nack;
 
-    // Cancel the waiter if the transport disconnects
-    extra.signal?.addEventListener("abort", cancel, { once: true });
+      const result = {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            approved: claimed.data.approved,
+            feedback: claimed.data.feedback,
+            iteration: claimed.data.iteration,
+          }, null, 2),
+        }],
+      };
 
-    const response = await promise;
+      nack = undefined;
+      return result;
+    } catch (err) {
+      nack?.();
+      throw err;
+    }
+  });
 
+  server.registerTool("ack_review", {
+    description:
+      "Acknowledge receipt of a review response. " +
+      "Call this after every request_review result to confirm you received the feedback. " +
+      "This prevents the response from being redelivered on restart.",
+    inputSchema: {
+      iteration: z.number().describe("The iteration number of the review to acknowledge"),
+      channel: z
+        .string()
+        .optional()
+        .default("default")
+        .describe("Channel name"),
+    },
+  }, async ({ iteration, channel }) => {
+    markResponseConsumed(iteration, channel ?? "default");
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({
-          approved: response.approved,
-          feedback: response.feedback,
-          iteration: response.iteration,
-        }, null, 2),
+        text: `Review response for iteration ${iteration} acknowledged.`,
       }],
     };
   });

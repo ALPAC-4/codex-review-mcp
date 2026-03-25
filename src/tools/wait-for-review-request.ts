@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { GetBroker } from "../create-server.js";
+import { pollForRequest } from "../file-store.js";
 
-export function registerWaitForReviewRequest(server: McpServer, getBroker: GetBroker): void {
+export function registerWaitForReviewRequest(server: McpServer): void {
   server.registerTool("wait_for_review_request", {
     description:
       "Wait for a code review request from the Claude implementer. " +
@@ -17,22 +17,34 @@ export function registerWaitForReviewRequest(server: McpServer, getBroker: GetBr
         .describe("Channel name to listen on. Must match the channel used by the Claude implementer"),
     },
   }, async ({ channel }, extra) => {
-    const broker = getBroker(channel ?? "default");
-    const { promise, cancel } = broker.waitForReviewRequest();
+    const ch = channel ?? "default";
 
-    // Cancel the waiter if the transport disconnects
-    extra.signal?.addEventListener("abort", cancel, { once: true });
+    let nack: (() => void) | undefined;
+    const onAbort = () => { nack?.(); };
+    extra.signal?.addEventListener("abort", onAbort, { once: true });
 
-    const request = await promise;
+    try {
+      const claimed = await pollForRequest(ch, extra.signal);
+      nack = claimed.nack;
 
-    return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify({
-          context: request.context,
-          iteration: request.iteration,
-        }, null, 2),
-      }],
-    };
+      // Do NOT mark request consumed here — it will be acked when
+      // submit_review is called with this iteration number.
+
+      const result = {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            context: claimed.data.context,
+            iteration: claimed.data.iteration,
+          }, null, 2),
+        }],
+      };
+
+      nack = undefined;
+      return result;
+    } catch (err) {
+      nack?.();
+      throw err;
+    }
   });
 }
