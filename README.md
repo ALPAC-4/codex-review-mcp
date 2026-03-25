@@ -43,6 +43,20 @@ claude mcp add codex-review -- node /path/to/codex-review-mcp/build/index.js --r
 codex mcp add codex-review -- node /path/to/codex-review-mcp/build/index.js --role codex
 ```
 
+### Optional: Increase Codex MCP timeout
+
+Codex CLI recognizes per-server MCP timeout settings in `~/.codex/config.toml`.
+
+```toml
+[mcp_servers.codex-review]
+command = "node"
+args = ["/path/to/codex-review-mcp/build/index.js", "--role", "codex"]
+tool_timeout_sec = 300
+startup_timeout_sec = 45
+```
+
+If `codex-review` is already registered, add only the timeout keys to the existing `mcp_servers.codex-review` section.
+
 ### Run
 
 - **To Claude:** "Implement feature X" → Claude implements, then automatically calls `request_review`
@@ -74,7 +88,7 @@ codex mcp add codex-review -- node /path/to/codex-review-mcp/build/index.js --ro
 
 ## Known Limitations
 
-**Codex CLI tool call timeout (120s):** Codex CLI has a hard 120-second timeout on MCP tool calls. If `wait_for_review_request` doesn't receive a request within 120s, the call will fail with a timeout error. When this happens, Codex should simply call `wait_for_review_request` again to resume waiting. The request file persists on disk, so no messages are lost.
+**Codex CLI tool call timeout:** If `tool_timeout_sec` is not increased, `wait_for_review_request` may time out after about 120 seconds in the default Codex CLI setup. When this happens, Codex should simply call `wait_for_review_request` again to resume waiting. The request file persists on disk, so no messages are lost.
 
 ## Architecture
 
