@@ -7,8 +7,9 @@ export function registerWaitForReviewRequest(server: McpServer): void {
     description:
       "Wait for a code review request from the Claude implementer. " +
       "Returns the context describing what was changed. You have access to the same repo — read the code directly to review. " +
-      "After reviewing, call submit_review with your feedback. " +
-      "Loop: wait_for_review_request → read code & analyze → submit_review → repeat.",
+      "After reviewing, you MUST call submit_review with your feedback before calling this again. " +
+      "IMPORTANT: Never call this without first submitting your review for the previous request. " +
+      "After submit_review, ALWAYS call this again immediately to continue the review loop.",
     inputSchema: {
       channel: z
         .string()

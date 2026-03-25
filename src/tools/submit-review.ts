@@ -8,7 +8,8 @@ export function registerSubmitReview(server: McpServer): void {
       "Submit your code review feedback to the Claude implementer. " +
       "Set approved=true only if the code is correct and needs no changes. " +
       "Set approved=false with detailed feedback if issues are found. " +
-      "You must pass the iteration number from the review request you received.",
+      "You must pass the iteration number from the review request you received. " +
+      "After calling this, ALWAYS call wait_for_review_request() immediately to continue the review loop.",
     inputSchema: {
       feedback: z
         .string()
@@ -28,12 +29,13 @@ export function registerSubmitReview(server: McpServer): void {
   }, async ({ feedback, approved, iteration, channel }) => {
     const ch = channel ?? "default";
 
-    // Mark the request as consumed — the reviewer has unquestionably received
-    // and used it, since they're now submitting feedback for it.
-    markRequestConsumed(iteration, ch);
-
-    // Write the review response
+    // Write the response FIRST — ensures it's visible before we consume the request.
+    // If crash after writeResponse but before markRequestConsumed, the request
+    // gets redelivered (at-least-once) which is safe.
     writeResponse(feedback, approved, iteration, ch);
+
+    // Mark the request as consumed — safe now because response is durable.
+    markRequestConsumed(iteration, ch);
 
     return {
       content: [{

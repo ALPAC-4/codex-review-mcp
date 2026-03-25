@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 const BASE_DIR = ".codex-review";
 const POLL_INTERVAL = 1000;
@@ -65,24 +66,42 @@ function markDone(dir: string, baseName: string): void {
   try { fs.writeFileSync(path.join(dir, `${baseName}.done`), "", "utf-8"); } catch {}
 }
 
+function atomicWriteFile(filePath: string, content: string): void {
+  const tmpPath = `${filePath}.tmp.${randomUUID()}`;
+  fs.writeFileSync(tmpPath, content, "utf-8");
+  fs.renameSync(tmpPath, filePath);
+}
+
 /**
- * Recover claimed files from dead processes (skip if .done exists).
+ * Recover orphaned claimed files:
+ * - If .done exists for this iteration: delete the .claimed file (cleanup)
+ * - If owning PID is dead: rename .claimed → .json (redelivery)
+ * - If owning PID is alive but it's our own PID: rename .claimed → .json
+ *   (our own stale claims from previous tool calls that were never acked)
+ * - If owning PID is alive and it's another process: skip (they're working on it)
  */
-function recoverOrphaned(dir: string): void {
+function recoverOrphaned(dir: string, currentlyPolling?: string): void {
   try {
     for (const f of fs.readdirSync(dir)) {
       const match = f.match(/^(.+)\.claimed\.(\d+)$/);
       if (!match) continue;
       const baseName = match[1];
       const pid = parseInt(match[2], 10);
-      if (pid === MY_PID) continue;
-      if (isPidAlive(pid)) continue;
-
       const claimedPath = path.join(dir, f);
+
+      // Don't recover the file we're actively polling for right now
+      if (currentlyPolling && claimedPath === currentlyPolling) continue;
+
+      // If already done, just clean up
       if (isDone(dir, baseName)) {
         try { fs.unlinkSync(claimedPath); } catch {}
         continue;
       }
+
+      // Another live process owns it — skip
+      if (pid !== MY_PID && isPidAlive(pid)) continue;
+
+      // Dead PID or our own stale claim — recover
       const jsonPath = path.join(dir, `${baseName}.json`);
       try { fs.renameSync(claimedPath, jsonPath); } catch {}
     }
@@ -90,8 +109,25 @@ function recoverOrphaned(dir: string): void {
 }
 
 /**
- * Atomic increment with lock file.
+ * Scan request/response dirs for the highest iteration number on disk.
+ * Covers .json, .claimed.*, and .done files.
  */
+function getMaxIterationOnDisk(channel: string): number {
+  let max = 0;
+  for (const dir of [requestsDir(channel), responsesDir(channel)]) {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        const match = f.match(/^(\d+)\./);
+        if (match) {
+          const n = parseInt(match[1], 10);
+          if (n > max) max = n;
+        }
+      }
+    } catch {}
+  }
+  return max;
+}
+
 function nextIteration(channel: string): number {
   const lock = lockFilePath(channel);
   const iterFile = iterationFile(channel);
@@ -126,6 +162,13 @@ function nextIteration(channel: string): number {
     try {
       n = parseInt(fs.readFileSync(iterFile, "utf-8").trim(), 10) || 0;
     } catch {}
+
+    // Ensure monotonicity: scan for max existing iteration across requests/responses
+    const maxOnDisk = getMaxIterationOnDisk(channel);
+    if (maxOnDisk > n) {
+      n = maxOnDisk;
+    }
+
     n++;
     fs.writeFileSync(iterFile, String(n), "utf-8");
     return n;
@@ -138,33 +181,24 @@ export function writeRequest(context: string, channel: string): number {
   ensureDirs(channel);
   const iteration = nextIteration(channel);
   const request: ReviewRequest = { context, iteration, requestedAt: Date.now() };
-  fs.writeFileSync(
-    path.join(requestsDir(channel), `${padIteration(iteration)}.json`),
-    JSON.stringify(request, null, 2),
-    "utf-8"
-  );
+  const filePath = path.join(requestsDir(channel), `${padIteration(iteration)}.json`);
+  atomicWriteFile(filePath, JSON.stringify(request, null, 2));
+  console.error(`[write-request] Wrote iteration ${iteration} to ${path.resolve(filePath)}`);
   return iteration;
 }
 
 export function writeResponse(feedback: string, approved: boolean, iteration: number, channel: string): void {
   ensureDirs(channel);
   const response: ReviewResponse = { feedback, approved, iteration, reviewedAt: Date.now() };
-  fs.writeFileSync(
-    path.join(responsesDir(channel), `${padIteration(iteration)}.json`),
-    JSON.stringify(response, null, 2),
-    "utf-8"
-  );
+  const filePath = path.join(responsesDir(channel), `${padIteration(iteration)}.json`);
+  atomicWriteFile(filePath, JSON.stringify(response, null, 2));
+  console.error(`[write-response] Wrote iteration ${iteration} to ${path.resolve(filePath)}`);
 }
 
-/**
- * Mark a request as consumed. Called by submit_review when the reviewer
- * submits feedback — this proves the reviewer received and used the request.
- */
 export function markRequestConsumed(iteration: number, channel: string): void {
   const dir = requestsDir(channel);
   const baseName = padIteration(iteration);
   markDone(dir, baseName);
-  // Clean up claimed file if it exists
   try {
     for (const f of fs.readdirSync(dir)) {
       if (f.startsWith(baseName) && f.includes(".claimed.")) {
@@ -174,10 +208,6 @@ export function markRequestConsumed(iteration: number, channel: string): void {
   } catch {}
 }
 
-/**
- * Mark a response as consumed. Called explicitly after the implementer
- * has durably received the review feedback.
- */
 export function markResponseConsumed(iteration: number, channel: string): void {
   const dir = responsesDir(channel);
   const baseName = padIteration(iteration);
@@ -192,23 +222,31 @@ export function markResponseConsumed(iteration: number, channel: string): void {
 }
 
 /**
- * Claim a request file: .json → .claimed.{pid}
- * Does NOT mark as consumed — that happens when submit_review is called.
+ * Poll for a request file. Claims via .json → .claimed.{pid}.
+ * Same-PID stale claims are recovered on each poll cycle.
+ * The `currentlyPolling` path is excluded from recovery.
  */
 export function pollForRequest(
   channel: string,
   signal?: AbortSignal
 ): Promise<{ data: ReviewRequest; nack: () => void }> {
   const dir = requestsDir(channel);
+  let myClaimedPath: string | undefined;
 
   return new Promise((resolve, reject) => {
     const check = () => {
       if (signal?.aborted) {
+        // Unclaim if we had claimed something
+        if (myClaimedPath) {
+          const jsonPath = myClaimedPath.replace(`.claimed.${MY_PID}`, ".json");
+          try { fs.renameSync(myClaimedPath, jsonPath); } catch {}
+          myClaimedPath = undefined;
+        }
         reject(new Error("aborted"));
         return;
       }
 
-      recoverOrphaned(dir);
+      recoverOrphaned(dir, myClaimedPath);
 
       try {
         const files = fs.readdirSync(dir)
@@ -228,11 +266,31 @@ export function pollForRequest(
             continue;
           }
 
-          const data = JSON.parse(fs.readFileSync(claimedPath, "utf-8")) as ReviewRequest;
-          resolve({
-            data,
-            nack: () => { try { fs.renameSync(claimedPath, jsonPath); } catch {} },
-          });
+          myClaimedPath = claimedPath;
+
+          if (signal?.aborted) {
+            try { fs.renameSync(claimedPath, jsonPath); } catch {}
+            myClaimedPath = undefined;
+            reject(new Error("aborted"));
+            return;
+          }
+
+          let data: ReviewRequest;
+          try {
+            data = JSON.parse(fs.readFileSync(claimedPath, "utf-8")) as ReviewRequest;
+          } catch {
+            try { fs.renameSync(claimedPath, jsonPath); } catch {}
+            myClaimedPath = undefined;
+            continue;
+          }
+
+          const nack = () => {
+            try { fs.renameSync(claimedPath, jsonPath); } catch {}
+            myClaimedPath = undefined;
+          };
+
+          signal?.addEventListener("abort", nack, { once: true });
+          resolve({ data, nack });
           return;
         }
       } catch {}
@@ -245,8 +303,7 @@ export function pollForRequest(
 }
 
 /**
- * Claim a response file: .json → .claimed.{pid}
- * Does NOT mark as consumed — caller must explicitly call markResponseConsumed.
+ * Poll for a response file. Same claim semantics as pollForRequest.
  */
 export function pollForResponse(
   iteration: number,
@@ -258,16 +315,32 @@ export function pollForResponse(
   const jsonPath = path.join(dir, `${fileName}.json`);
   const claimedPath = path.join(dir, `${fileName}.claimed.${MY_PID}`);
 
+  console.error(`[poll-response] Waiting for iteration ${iteration} at ${path.resolve(jsonPath)}`);
+
+  let claimed = false;
+
   return new Promise((resolve, reject) => {
+    let pollCount = 0;
     const check = () => {
       if (signal?.aborted) {
+        if (claimed) {
+          try { fs.renameSync(claimedPath, jsonPath); } catch {}
+          claimed = false;
+        }
+        console.error(`[poll-response] Aborted for iteration ${iteration}`);
         reject(new Error("aborted"));
         return;
       }
 
-      recoverOrphaned(dir);
+      recoverOrphaned(dir, claimed ? claimedPath : undefined);
 
       try {
+        if (pollCount % 10 === 0) {
+          const files = fs.readdirSync(dir);
+          console.error(`[poll-response] Poll #${pollCount}, dir contents: [${files.join(", ")}]`);
+        }
+        pollCount++;
+
         if (fs.existsSync(jsonPath)) {
           try {
             fs.renameSync(jsonPath, claimedPath);
@@ -276,11 +349,34 @@ export function pollForResponse(
             return;
           }
 
-          const data = JSON.parse(fs.readFileSync(claimedPath, "utf-8")) as ReviewResponse;
-          resolve({
-            data,
-            nack: () => { try { fs.renameSync(claimedPath, jsonPath); } catch {} },
-          });
+          claimed = true;
+
+          if (signal?.aborted) {
+            try { fs.renameSync(claimedPath, jsonPath); } catch {}
+            claimed = false;
+            console.error(`[poll-response] Aborted after claim for iteration ${iteration}`);
+            reject(new Error("aborted"));
+            return;
+          }
+
+          let data: ReviewResponse;
+          try {
+            data = JSON.parse(fs.readFileSync(claimedPath, "utf-8")) as ReviewResponse;
+          } catch {
+            try { fs.renameSync(claimedPath, jsonPath); } catch {}
+            claimed = false;
+            setTimeout(check, POLL_INTERVAL);
+            return;
+          }
+
+          const nack = () => {
+            try { fs.renameSync(claimedPath, jsonPath); } catch {}
+            claimed = false;
+          };
+
+          signal?.addEventListener("abort", nack, { once: true });
+
+          resolve({ data, nack });
           return;
         }
       } catch {}
