@@ -34,7 +34,7 @@ npm run build
 ### Register with Claude Code (one-time)
 
 ```bash
-claude mcp add codex-review -- node /path/to/codex-review-mcp/build/index.js --role claude
+claude mcp add -s user codex-review -- node /path/to/codex-review-mcp/build/index.js --role claude
 ```
 
 ### Register with Codex CLI (one-time)
