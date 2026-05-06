@@ -5,8 +5,8 @@ import { pollForRequest } from "../file-store.js";
 export function registerWaitForReviewRequest(server: McpServer): void {
   server.registerTool("wait_for_review_request", {
     description:
-      "Wait for a code review request from the Claude implementer. " +
-      "Returns the context describing what was changed. You have access to the same repo — read the code directly to review. " +
+      "Wait for a code review request from the implementer. " +
+      "Returns the context describing what was changed. You have access to the same repo; read the code directly to review. " +
       "After reviewing, you MUST call submit_review with your feedback before calling this again. " +
       "IMPORTANT: Never call this without first submitting your review for the previous request. " +
       "After submit_review, ALWAYS call this again immediately to continue the review loop.",
@@ -15,7 +15,7 @@ export function registerWaitForReviewRequest(server: McpServer): void {
         .string()
         .optional()
         .default("default")
-        .describe("Channel name to listen on. Must match the channel used by the Claude implementer"),
+        .describe("Channel name to listen on. Must match the channel used by the implementer"),
     },
   }, async ({ channel }, extra) => {
     const ch = channel ?? "default";

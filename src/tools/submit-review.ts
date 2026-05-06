@@ -5,7 +5,7 @@ import { writeResponse, markRequestConsumed } from "../file-store.js";
 export function registerSubmitReview(server: McpServer): void {
   server.registerTool("submit_review", {
     description:
-      "Submit your code review feedback to the Claude implementer. " +
+      "Submit your code review feedback to the implementer. " +
       "Set approved=true only if the code is correct and needs no changes. " +
       "Set approved=false with detailed feedback if issues are found. " +
       "You must pass the iteration number from the review request you received. " +

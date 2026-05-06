@@ -1,25 +1,25 @@
 # codex-review-mcp
 
-MCP server that automates code review loops between Claude Code and OpenAI Codex CLI.
+MCP server that automates code review loops between two coding agents.
 
 ## Overview
 
-Two AI coding agents run simultaneously and exchange code reviews via MCP, communicating through files in the working directory.
+Two agents run simultaneously and exchange code reviews through files in the working directory.
 
 ```
-Claude Code ←── stdio ──→ MCP Server (role=claude) ──→ .codex-review/requests/
-Codex CLI   ←── stdio ──→ MCP Server (role=codex)  ←── .codex-review/requests/
-                                                    ──→ .codex-review/responses/
+Implementing agent ←── stdio ──→ MCP process ──→ .codex-review/requests/
+Reviewing agent    ←── stdio ──→ MCP process ←── .codex-review/requests/
+                                                   ──→ .codex-review/responses/
 ```
 
-No separate broker server needed. Each agent runs its own stdio MCP server process, and they communicate via JSON files in `.codex-review/`.
+No daemon or broker server is needed. Each agent starts its own stdio MCP process, both processes expose the same tools, and they communicate via JSON files in `.codex-review/`.
 
 ### Review Loop
 
-1. Claude implements code and calls `request_review`
-2. Codex receives the request via `wait_for_review_request`
-3. Codex reads the code directly from the repo, reviews it, and sends feedback via `submit_review`
-4. Claude receives feedback → fixes issues → calls `request_review` again
+1. The implementing agent changes code and calls `request_review`
+2. The reviewing agent receives the request via `wait_for_review_request`
+3. The reviewer reads the code directly from the repo and sends feedback via `submit_review`
+4. The implementer receives feedback, calls `ack_review`, fixes issues, and calls `request_review` again
 5. Repeats until `approved: true`
 
 ## Installation
@@ -31,26 +31,30 @@ npm run build
 
 ## Setup
 
-### Register with Claude Code (one-time)
+Register the same command with each MCP client.
+
+### Claude Code
 
 ```bash
-claude mcp add -s user codex-review -- node /path/to/codex-review-mcp/build/index.js --role claude
+claude mcp add -s user codex-review -- node /path/to/codex-review-mcp/build/index.js
 ```
 
-### Register with Codex CLI (one-time)
+### Codex CLI
 
 ```bash
-codex mcp add codex-review -- node /path/to/codex-review-mcp/build/index.js --role codex
+codex mcp add codex-review -- node /path/to/codex-review-mcp/build/index.js
 ```
 
-### Optional: Increase Codex MCP timeout
+No mode argument is required. Extra command-line arguments are ignored.
+
+### Optional: Increase Codex MCP Timeout
 
 Codex CLI recognizes per-server MCP timeout settings in `~/.codex/config.toml`.
 
 ```toml
 [mcp_servers.codex-review]
 command = "node"
-args = ["/path/to/codex-review-mcp/build/index.js", "--role", "codex"]
+args = ["/path/to/codex-review-mcp/build/index.js"]
 tool_timeout_sec = 300
 startup_timeout_sec = 45
 ```
@@ -59,40 +63,36 @@ If `codex-review` is already registered, add only the timeout keys to the existi
 
 ### Run
 
-- **To Claude:** "Implement feature X" → Claude implements, then automatically calls `request_review`
-- **To Codex:** "Enter review mode" → Codex enters `wait_for_review_request` → `submit_review` loop
+- To the implementing agent: use `implement_and_review` or ask it to implement a task and call `request_review`
+- To the reviewing agent: use `review_mode` so it waits with `wait_for_review_request` and replies with `submit_review`
 
 ## MCP Tools
 
-### Claude only (role=claude)
+All tools are available in every MCP process.
 
 | Tool | Description |
 |------|-------------|
-| `request_review` | Request a review from Codex and wait for the response. Returns `{ approved, feedback, iteration }` |
-| `get_review_status` | Check review status |
-
-### Codex only (role=codex)
-
-| Tool | Description |
-|------|-------------|
-| `wait_for_review_request` | Wait for a review request from Claude. Returns `{ context, iteration }` |
+| `request_review` | Request a review and wait for the response. Returns `{ approved, feedback, iteration }` |
+| `ack_review` | Acknowledge a received review response so it is not redelivered |
+| `wait_for_review_request` | Wait for a review request. Returns `{ context, iteration }` |
 | `submit_review` | Submit review feedback. Requires `feedback`, `approved`, and `iteration` |
-| `get_review_status` | Check review status |
+| `get_review_status` | Check current iteration and pending messages |
 
 ## MCP Prompts
 
-| Prompt | Role | Description |
-|--------|------|-------------|
-| `implement_and_review` | Claude | Guides the implement → review → fix loop workflow |
-| `review_mode` | Codex | Guides continuous review mode |
+| Prompt | Use | Description |
+|--------|-----|-------------|
+| `implement_and_review` | Implementing agent | Guides the implement -> review -> fix loop workflow |
+| `review_mode` | Reviewing agent | Guides continuous review mode |
 
 ## Known Limitations
 
-**Codex CLI tool call timeout:** If `tool_timeout_sec` is not increased, `wait_for_review_request` may time out after about 120 seconds in the default Codex CLI setup. When this happens, Codex should simply call `wait_for_review_request` again to resume waiting. The request file persists on disk, so no messages are lost.
+**Codex CLI tool call timeout:** If `tool_timeout_sec` is not increased, `wait_for_review_request` may time out after about 120 seconds in the default Codex CLI setup. When this happens, the reviewer should simply call `wait_for_review_request` again to resume waiting. The request file persists on disk, so no messages are lost.
 
 ## Architecture
 
-- **File-based IPC**: Messages are JSON files in `.codex-review/` — no broker server needed
-- **stdio transport**: Both agents use the standard MCP stdio transport
+- **File-based IPC**: Messages are JSON files in `.codex-review/`; no broker server needed
+- **stdio transport**: Each agent uses the standard MCP stdio transport and starts its own local MCP process
+- **Single tool surface**: Every MCP process exposes the same tools and prompts
 - **Iteration matching**: Pairs requests and responses by iteration number
 - **No message loss**: Files persist on disk until explicitly consumed. If a poll is interrupted, the file stays for the next attempt

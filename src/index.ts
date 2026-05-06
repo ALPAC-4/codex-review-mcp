@@ -10,22 +10,7 @@ import { registerGetReviewStatus } from "./tools/get-review-status.js";
 import { registerImplementAndReviewPrompt } from "./prompts/implement-and-review.js";
 import { registerReviewModePrompt } from "./prompts/review-mode.js";
 
-type Role = "claude" | "codex";
-
-function parseArgs(): Role {
-  const args = process.argv.slice(2);
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--role") {
-      const role = args[i + 1] as Role;
-      if (role === "claude" || role === "codex") return role;
-    }
-  }
-  console.error("Usage: codex-review-mcp --role claude|codex");
-  process.exit(1);
-}
-
 async function main() {
-  const role = parseArgs();
   ensureDirs("default");
 
   const server = new McpServer({
@@ -33,21 +18,17 @@ async function main() {
     version: "3.0.0",
   });
 
-  if (role === "claude") {
-    registerRequestReview(server);
-    registerImplementAndReviewPrompt(server);
-  } else {
-    registerWaitForReviewRequest(server);
-    registerSubmitReview(server);
-    registerReviewModePrompt(server);
-  }
-
+  registerRequestReview(server);
+  registerWaitForReviewRequest(server);
+  registerSubmitReview(server);
   registerGetReviewStatus(server);
+  registerImplementAndReviewPrompt(server);
+  registerReviewModePrompt(server);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error(`[codex-review-mcp] Started as ${role} (stdio, file-based IPC)`);
+  console.error("[codex-review-mcp] Started (stdio, file-based IPC)");
 }
 
 main().catch((err) => {

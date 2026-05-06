@@ -5,7 +5,7 @@ import { writeRequest, pollForResponse, markResponseConsumed } from "../file-sto
 export function registerRequestReview(server: McpServer): void {
   server.registerTool("request_review", {
     description:
-      "Request a code review from the Codex reviewer. " +
+      "Request a code review from the reviewer. " +
       "The reviewer has access to the same repo, so no need to pass code. " +
       "Just describe what you changed. Returns { approved, feedback, iteration }. " +
       "After receiving the result, always call ack_review(iteration) to confirm receipt. " +

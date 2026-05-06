@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 export function registerImplementAndReviewPrompt(server: McpServer): void {
   server.registerPrompt("implement_and_review", {
-    description: "Workflow for implementing code with automated Codex code review loop",
+    description: "Workflow for implementing code with an automated code review loop",
     argsSchema: {
       task: z.string().describe("Description of the implementation task"),
     },
